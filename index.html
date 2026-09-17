@@ -91,7 +91,7 @@ input,textarea,select{background:none;border:0;outline:none}
 .monthbar button{width:30px;height:28px;display:grid;place-items:center;border-radius:999px;color:var(--accent)}
 .monthbar button:active{background:var(--accent-soft)}
 .monthbar button[disabled]{color:var(--text-3);opacity:.45}
-.monthbar .label{min-width:104px;text-align:center;font-size:14px;font-weight:650;letter-spacing:-.1px;padding:0 2px}
+.monthbar .label{min-width:118px;text-align:center;font-size:14px;font-weight:650;letter-spacing:-.1px;padding:0 2px}
 .monthbar .label small{display:block;font-size:10px;font-weight:600;color:var(--text-3);letter-spacing:.3px;text-transform:uppercase;line-height:1}
 
 /* ============================================================
@@ -257,6 +257,11 @@ button.row:active,a.row:active{background:var(--card-2)}
 .searchbar{display:flex;align-items:center;gap:8px;background:var(--field-2);border-radius:11px;padding:8px 11px;margin-bottom:12px}
 .searchbar input{flex:1;font-size:16px}
 
+.daygrid{display:grid;grid-template-columns:repeat(7,1fr);gap:7px}
+.daygrid .dayc{aspect-ratio:1;border-radius:10px;background:var(--field-2);font-size:15px;font-weight:600;
+  display:grid;place-items:center;font-variant-numeric:tabular-nums}
+.daygrid .dayc[aria-selected="true"]{background:var(--accent);color:#fff;font-weight:750}
+
 /* empty state */
 .empty{text-align:center;padding:38px 24px;color:var(--text-2)}
 .empty .em{font-size:40px;margin-bottom:10px;opacity:.85}
@@ -330,6 +335,8 @@ button.row:active,a.row:active{background:var(--card-2)}
 
 /* Storage identifier. Deliberately NOT renamed with the app: changing it would
    orphan every entry already saved on the device. It is never shown to anyone. */
+const APP_VERSION = '1.1';
+
 const DB_KEY = 'kasa.v1';
 const SCHEMA = 3;
 
@@ -361,7 +368,8 @@ const SVG = {
   repeat:'<path d="M17 2l4 4-4 4"/><path d="M3 12V10a4 4 0 0 1 4-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 12v2a4 4 0 0 1-4 4H3"/>',
   edit:'<path d="M4 20h4L20 8a2.8 2.8 0 0 0-4-4L4 16v4z"/>',
   info:'<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 7.6h.01"/>',
-  chart:'<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>'
+  chart:'<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
+  note:'<path d="M6 3h9l5 5v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14.5 3v5.5H20"/><path d="M8.5 13h7M8.5 17h4"/>'
 };
 function ico(name, size, sw){
   return '<svg width="'+(size||22)+'" height="'+(size||22)+'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="'+(sw||1.9)+'" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+SVG[name]+'</svg>';
@@ -451,24 +459,75 @@ function amountFieldHTML(id, value, extra){
 
 /* ============================================================
    DATES — "YYYY-MM-DD" strings, local calendar, no timezone math
+
+   A "period" is one budget month. Normally it is the calendar month, but
+   `settings.budgetStartDay` can move it — set it to 10 and the period keyed
+   "2026-09" runs 10 Sep to 9 Oct, because that is when the money arrives.
+   Period keys stay "YYYY-MM" (named after the month the period starts in),
+   so every budget, limit and report written before this existed keeps working.
    ============================================================ */
 function todayISO(){
   const d = new Date();
   return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
 }
-const monthKey  = (iso) => iso.slice(0, 7);                 // "2026-09"
-const thisMonth = () => todayISO().slice(0, 7);
+const isoToDate = (iso) => new Date(+iso.slice(0,4), +iso.slice(5,7)-1, +iso.slice(8,10));
+function dateToISO(d){
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+function addDays(iso, n){ const d = isoToDate(iso); d.setDate(d.getDate()+n); return dateToISO(d); }
+const daysBetween = (a, b) => Math.round((isoToDate(b) - isoToDate(a)) / 86400000);
+function daysInMonth(mk){ return new Date(+mk.slice(0,4), +mk.slice(5,7), 0).getDate(); }
 function monthShift(mk, n){
   let y = +mk.slice(0,4), m = +mk.slice(5,7) - 1 + n;
   y += Math.floor(m / 12); m = ((m % 12) + 12) % 12;
   return y + '-' + String(m+1).padStart(2,'0');
 }
-const inMonth = (iso, mk) => iso.slice(0,7) === mk;
-function monthLabel(mk, opt){
-  const d = new Date(+mk.slice(0,4), +mk.slice(5,7)-1, 1);
-  return d.toLocaleDateString(undefined, opt || {month:'long', year:'numeric'});
+/** Add months, clamping the day (31 Jan + 1 month = 28/29 Feb). */
+function addMonthsClamped(iso, n){
+  const mk = monthShift(iso.slice(0,7), n);
+  const day = Math.min(+iso.slice(8,10), daysInMonth(mk));
+  return mk + '-' + String(day).padStart(2,'0');
 }
-const monthShort = (mk) => new Date(+mk.slice(0,4), +mk.slice(5,7)-1, 1).toLocaleDateString(undefined,{month:'short'});
+
+/* ---------- budget periods ---------- */
+/** 1–28. Capped at 28 so every month has the day; 1 means calendar months. */
+function budgetStartDay(){
+  const d = state && state.settings ? state.settings.budgetStartDay : 1;
+  return clamp(Math.round(Number(d) || 1), 1, 28);
+}
+const usesCalendarMonths = () => budgetStartDay() === 1;
+const periodStart = (pk) => pk + '-' + String(budgetStartDay()).padStart(2,'0');
+const periodEnd   = (pk) => periodStart(monthShift(pk, 1));     // exclusive
+const periodLast  = (pk) => addDays(periodEnd(pk), -1);
+/** Which period does this date belong to? */
+function periodOf(iso){
+  const mk = iso.slice(0,7);
+  return (+iso.slice(8,10)) >= budgetStartDay() ? mk : monthShift(mk, -1);
+}
+const monthKey  = (iso) => periodOf(iso);
+const thisMonth = () => periodOf(todayISO());
+const inMonth   = (iso, pk) => periodOf(iso) === pk;
+const daysInPeriod = (pk) => daysBetween(periodStart(pk), periodEnd(pk));
+function datesInPeriod(pk){
+  const out = [];
+  let d = periodStart(pk); const stop = periodEnd(pk);
+  let guard = 0;
+  while (d < stop && guard++ < 70){ out.push(d); d = addDays(d, 1); }
+  return out;
+}
+
+function monthLabel(pk, opt){
+  opt = opt || {month:'long', year:'numeric'};
+  if (usesCalendarMonths()){
+    return new Date(+pk.slice(0,4), +pk.slice(5,7)-1, 1).toLocaleDateString(undefined, opt);
+  }
+  const s = periodStart(pk), e = periodLast(pk);
+  if (opt.month === 'short') return shortDate(s);
+  const range = shortDate(s) + ' – ' + shortDate(e);
+  return opt.year ? range + ' ' + e.slice(0,4) : range;
+}
+const monthShort = (pk) => new Date(+pk.slice(0,4), +pk.slice(5,7)-1, 1).toLocaleDateString(undefined,{month:'short'});
+
 function dayLabel(iso){
   const t = todayISO();
   if (iso === t) return 'Today';
@@ -482,18 +541,6 @@ function dayLabel(iso){
 }
 function shortDate(iso){
   return isoToDate(iso).toLocaleDateString(undefined,{day:'numeric',month:'short'});
-}
-const isoToDate = (iso) => new Date(+iso.slice(0,4), +iso.slice(5,7)-1, +iso.slice(8,10));
-function dateToISO(d){
-  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
-}
-function addDays(iso, n){ const d = isoToDate(iso); d.setDate(d.getDate()+n); return dateToISO(d); }
-function daysInMonth(mk){ return new Date(+mk.slice(0,4), +mk.slice(5,7), 0).getDate(); }
-/** Add months, clamping the day (31 Jan + 1 month = 28/29 Feb). */
-function addMonthsClamped(iso, n){
-  const mk = monthShift(iso.slice(0,7), n);
-  const day = Math.min(+iso.slice(8,10), daysInMonth(mk));
-  return mk + '-' + String(day).padStart(2,'0');
 }
 
 /* ============================================================
@@ -563,11 +610,15 @@ function blankState(){
     schema: SCHEMA,
     settings:{
       currency:'PLN', theme:'system', onboarded:false,
+      budgetStartDay: 1,
       pinHash:null, pinLock:false, carryPrompted:{},
-      hideAmounts:false, lastBackupAt:null, startTab:'dashboard'
+      hideAmounts:false, lastBackupAt:null, startTab:'dashboard',
+      autoBackup:{enabled:true, frequency:'weekly', lastRunAt:null, lastFileAt:null, fileName:null}
     },
     categories: [],
     goals: [],
+    noteFolders: [],
+    notes: [],
     transactions: [],
     monthlyBudgets: {},     // "2026-09" -> minor units
     categoryBudgets: {},    // "2026-09" -> { catId: minor units }
@@ -639,6 +690,7 @@ function migrate(s){
   s.schema = s.schema || 1;
   s.settings = Object.assign(blankState().settings, s.settings || {});
   s.categories = s.categories || []; s.goals = s.goals || [];
+  s.noteFolders = s.noteFolders || []; s.notes = s.notes || [];
   s.transactions = s.transactions || []; s.recurring = s.recurring || [];
   s.monthlyBudgets = s.monthlyBudgets || {}; s.categoryBudgets = s.categoryBudgets || {};
   // normalise any legacy Date-ish values to YYYY-MM-DD
@@ -747,11 +799,12 @@ const Calc = {
   },
   totalSaved(){ return state.goals.reduce((s,g) => s + Calc.goalBalance(g.id), 0); },
 
-  /** Pace: how far through the month we are, 0..1. Current month only. */
-  monthProgress(mk){
-    if (mk !== thisMonth()) return null;
-    const day = +todayISO().slice(8,10);
-    return day / daysInMonth(mk);
+  /** Pace: how far through the budget period we are, 0..1. Current period only. */
+  monthProgress(pk){
+    if (pk !== thisMonth()) return null;
+    const total = daysInPeriod(pk);
+    const done = daysBetween(periodStart(pk), todayISO()) + 1;
+    return clamp(done / total, 0, 1);
   },
   /** Average daily expense so far this month, projected to month end. */
   projectedSpend(mk){
@@ -768,7 +821,7 @@ const Calc = {
     return 'ok';
   },
   monthsWithData(){
-    const set = new Set(state.transactions.map(t => t.date.slice(0,7)));
+    const set = new Set(state.transactions.map(t => periodOf(t.date)));
     Object.keys(state.monthlyBudgets).forEach(k => set.add(k));
     set.add(thisMonth());
     return [...set].sort();
@@ -784,8 +837,9 @@ const Calc = {
 Object.assign(Calc, {
 
   /* ---------- ranges ---------- */
-  monthRange(mk){ return [mk + '-01', monthShift(mk, 1) + '-01']; },
-  yearRange(y){ return [y + '-01-01', (Number(y) + 1) + '-01-01']; },
+  monthRange(pk){ return [periodStart(pk), periodEnd(pk)]; },
+  /** A "year" is the twelve budget periods labelled y-01 … y-12. */
+  yearRange(y){ return [periodStart(y + '-01'), periodStart((Number(y) + 1) + '-01')]; },
   allRange(){
     const dates = state.transactions.map(t => t.date);
     const first = dates.length ? dates.reduce((a, b) => a < b ? a : b) : todayISO();
@@ -840,22 +894,22 @@ Object.assign(Calc, {
       .slice(0, n || 5);
   },
 
-  /** One entry per calendar day of the month, zeros included. */
-  dailyTotals(mk){
-    const n = daysInMonth(mk), out = [];
-    for (let d = 1; d <= n; d++) out.push({date: mk + '-' + String(d).padStart(2,'0'), total: 0});
+  /** One entry per day of the budget period, zeros included. */
+  dailyTotals(pk){
+    const out = datesInPeriod(pk).map(date => ({date, total: 0}));
+    const index = new Map(out.map((d, i) => [d.date, i]));
     for (const t of state.transactions){
-      if (t.kind !== 'expense' || !inMonth(t.date, mk)) continue;
-      out[(+t.date.slice(8,10)) - 1].total += t.amountMinor;
+      if (t.kind !== 'expense') continue;
+      const i = index.get(t.date);
+      if (i !== undefined) out[i].total += t.amountMinor;
     }
     return out;
   },
   /** Days already elapsed that had no expense at all. Past months count in full. */
-  noSpendDays(mk){
-    const days = Calc.dailyTotals(mk);
+  noSpendDays(pk){
+    const days = Calc.dailyTotals(pk);
     const today = todayISO();
-    const elapsed = days.filter(d => d.date <= today);
-    const scope = mk < thisMonth() ? days : elapsed;
+    const scope = pk < thisMonth() ? days : days.filter(d => d.date <= today);
     return {count: scope.filter(d => d.total === 0).length, of: scope.length};
   },
 
@@ -884,8 +938,8 @@ Object.assign(Calc, {
     return out;
   },
   yearsWithData(){
-    const set = new Set(state.transactions.map(t => t.date.slice(0,4)));
-    set.add(String(new Date().getFullYear()));
+    const set = new Set(state.transactions.map(t => periodOf(t.date).slice(0,4)));
+    set.add(thisMonth().slice(0,4));
     return [...set].sort();
   },
 
@@ -904,7 +958,7 @@ Object.assign(Calc, {
     const first = Calc.firstEntryDate();
     if (!first) return [thisMonth()];
     const out = [];
-    let mk = first.slice(0,7);
+    let mk = periodOf(first);
     const last = thisMonth() > mk ? thisMonth() : mk;
     let guard = 0;
     while (mk <= last && guard++ < 600){ out.push(mk); mk = monthShift(mk, 1); }
@@ -1158,6 +1212,8 @@ const ui = {
   year: String(new Date().getFullYear()),
   reportPeriod: 'month',
   txFilter: {kind:'all', catId:null, goalId:null, q:''},
+  noteFolder: null,
+  noteQuery: '',
   budgetView: 'month',
   scrollMemo: {}
 };
@@ -1167,12 +1223,14 @@ const TABS = [
   {id:'budget',       label:'Budget',  icon:'wallet'},
   {id:'transactions', label:'Activity',icon:'list'},
   {id:'savings',      label:'Savings', icon:'target'},
+  {id:'notes',        label:'Notes',   icon:'note'},
   {id:'reports',      label:'Reports', icon:'chart'},
   {id:'settings',     label:'Settings',icon:'gear'}
 ];
 
 function go(tab){
   if (ui.tab === tab){ window.scrollTo({top:0, behavior:'smooth'}); return; }
+  if (ui.tab === 'notes'){ ui.noteQuery = ''; }
   ui.scrollMemo[ui.tab] = window.scrollY;
   ui.tab = tab;
   haptic();
@@ -1190,11 +1248,11 @@ function render(){
   const views = {
     dashboard: viewDashboard, budget: viewBudget,
     transactions: viewTransactions, savings: viewSavings,
-    reports: viewReports, settings: viewSettings
+    notes: viewNotes, reports: viewReports, settings: viewSettings
   };
   screen.appendChild(views[ui.tab]());
   screen.appendChild(tabBar());
-  if (ui.tab !== 'settings') screen.appendChild(fabBtn());
+  if (ui.tab !== 'settings' && ui.tab !== 'reports') screen.appendChild(fabBtn());
   app.replaceChildren(screen);
   bindStickyHeader();
 }
@@ -1211,8 +1269,9 @@ function tabBar(){
   return el;
 }
 function fabBtn(){
-  const b = h('<button class="fab" aria-label="Add transaction">' + ico('plus', 27, 2.4) + '</button>');
-  b.onclick = () => { haptic(12); addChooser(); };
+  const notes = ui.tab === 'notes';
+  const b = h('<button class="fab" aria-label="' + (notes ? 'New note' : 'Add transaction') + '">' + ico('plus', 27, 2.4) + '</button>');
+  b.onclick = () => { haptic(12); notes ? editNote(null) : addChooser(); };
   return b;
 }
 function bindStickyHeader(){
@@ -1456,9 +1515,9 @@ function paceNote(mk, budget, spent){
   if (diff >= 0) return '<span class="pos">' + money(diff) + ' ahead of pace</span>';
   return '<span class="warnc">' + money(-diff) + ' above pace</span>';
 }
-function remainingDaysNote(mk){
-  if (mk !== thisMonth()) return monthLabel(mk, {month:'long', year:'numeric'});
-  const left = daysInMonth(mk) - (+todayISO().slice(8,10)) + 1;
+function remainingDaysNote(pk){
+  if (pk !== thisMonth()) return monthLabel(pk, {month:'long', year:'numeric'});
+  const left = daysBetween(todayISO(), periodEnd(pk));
   return left + (left === 1 ? ' day left' : ' days left');
 }
 
@@ -1803,10 +1862,10 @@ function monthBars(series, opts){
 }
 
 /** Month grid, Monday first, shaded by how much was spent that day. */
-function calendarHeat(mk){
-  const days = Calc.dailyTotals(mk);
+function calendarHeat(pk){
+  const days = Calc.dailyTotals(pk);
   const max = Math.max(1, ...days.map(d => d.total));
-  const firstWd = (isoToDate(mk + '-01').getDay() + 6) % 7;
+  const firstWd = (isoToDate(days[0].date).getDay() + 6) % 7;
   const today = todayISO();
   let cells = '';
   for (let i = 0; i < firstWd; i++) cells += '<div></div>';
@@ -2279,7 +2338,7 @@ function reportCategory(catId){
   sheet({
     title: cat.name, left:'Done',
     build(s){
-      const [af, at] = [months[0] + '-01', monthShift(months[11], 1) + '-01'];
+      const [af, at] = [periodStart(months[0]), periodEnd(months[11])];
       const top = state.transactions
         .filter(t => t.categoryId === catId && t.date >= af && t.date < at)
         .sort((a,b) => b.amountMinor - a.amountMinor).slice(0, 5);
@@ -2509,6 +2568,308 @@ function reportWeekday(){
             + '</div>' : '');
     }
   });
+}
+
+/* ============================================================
+   NOTES — folders, and many notes inside each.
+   Notes live in the same state object as everything else, so they are
+   covered by backups, restores and the automatic snapshot for free.
+   ============================================================ */
+
+const NOTE_ICONS = ('📁 📒 📝 💡 ✅ 🧾 🏠 🚗 ✈️ 🎁 🛒 🍽️ 💊 🏋️ 🎓 💼 🔧 🐾 👶 🌿 ⭐ 🔒 📌 🎯 🧳 🎨 🎸 📞').split(' ');
+
+const notesInFolder = (fid) => state.notes
+  .filter(n => n.folderId === fid)
+  .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || b.updatedAt - a.updatedAt);
+const folderById = (id) => state.noteFolders.find(f => f.id === id) || null;
+const unfiledNotes = () => state.notes.filter(n => !n.folderId || !folderById(n.folderId));
+
+function noteExcerpt(n){
+  const body = (n.body || '').replace(/\s+/g, ' ').trim();
+  return body ? body.slice(0, 90) : 'No text yet';
+}
+function noteWhen(n){
+  const iso = dateToISO(new Date(n.updatedAt));
+  return dayLabel(iso);
+}
+
+/* ---------- the tab ---------- */
+function viewNotes(){
+  if (ui.noteFolder) return viewNoteFolder(ui.noteFolder);
+
+  const wrap = h('<div style="flex:1;display:flex;flex-direction:column"></div>');
+  const addBtn = h('<button class="pill neutral" style="gap:4px">' + ico('plus',14,2.4) + 'Folder</button>');
+  addBtn.onclick = () => editFolder(null);
+  wrap.appendChild(header('Notes', {right: addBtn}));
+  const c = h('<main class="content fade-in"></main>');
+
+  /* search across every note */
+  const sb = h('<div class="searchbar">' + ico('search',18)
+    + '<input type="search" placeholder="Search all notes" value="' + esc(ui.noteQuery) + '" aria-label="Search notes"></div>');
+  const input = sb.querySelector('input');
+  input.oninput = () => { ui.noteQuery = input.value; const l = $('#notesbody'); if (l) l.replaceWith(buildNotesBody()); };
+  c.appendChild(sb);
+  c.appendChild(buildNotesBody());
+
+  wrap.appendChild(c);
+  return wrap;
+}
+
+function buildNotesBody(){
+  const el = h('<div id="notesbody"></div>');
+  const q = ui.noteQuery.trim().toLowerCase();
+
+  if (q){
+    const hits = state.notes.filter(n =>
+      (n.title + ' ' + (n.body || '')).toLowerCase().includes(q)
+    ).sort((a, b) => b.updatedAt - a.updatedAt);
+    if (!hits.length){
+      const card = h('<div class="card"></div>');
+      card.appendChild(emptyState('🔍', 'No notes match', 'Try a different word.'));
+      el.appendChild(card);
+      return el;
+    }
+    el.appendChild(h('<div class="day-hd"><span>' + plural(hits.length, 'result') + '</span></div>'));
+    const rows = h('<div class="rows"></div>');
+    hits.forEach(n => rows.appendChild(noteRow(n, true)));
+    el.appendChild(rows);
+    return el;
+  }
+
+  if (!state.noteFolders.length && !state.notes.length){
+    const card = h('<div class="card"></div>');
+    card.appendChild(emptyState('📒', 'No notes yet',
+      'Make a folder for a theme — Bills, Car, Holiday, Ideas — and keep as many notes inside it as you like.',
+      'Create a folder', () => editFolder(null)));
+    el.appendChild(card);
+    return el;
+  }
+
+  /* folders */
+  if (state.noteFolders.length){
+    const sec = h('<section class="section" style="margin-top:6px"><div class="section-hd"><h2>Folders</h2>'
+      + '<span class="muted" style="font-size:13px">' + state.noteFolders.length + '</span></div><div class="rows"></div></section>');
+    const rows = sec.querySelector('.rows');
+    state.noteFolders.slice().sort((a,b) => a.createdAt - b.createdAt).forEach(f => {
+      const n = notesInFolder(f.id).length;
+      const r = h('<button class="row" style="padding:13px 14px">'
+        + '<span class="icon lg" style="background:' + softOf(f.color) + '">' + esc(f.icon) + '</span>'
+        + '<span class="body"><span class="t">' + esc(f.name) + '</span>'
+        + '<span class="s">' + (n ? plural(n, 'note') : 'Empty') + '</span></span>'
+        + '<span class="chev">' + ico('chevR',17) + '</span></button>');
+      r.onclick = () => { ui.noteFolder = f.id; haptic(); render(); window.scrollTo(0,0); };
+      rows.appendChild(r);
+    });
+    el.appendChild(sec);
+  }
+
+  /* notes that belong to no folder */
+  const loose = unfiledNotes();
+  if (loose.length){
+    const sec = h('<section class="section"><div class="section-hd"><h2>Unfiled</h2></div><div class="rows"></div></section>');
+    const rows = sec.querySelector('.rows');
+    loose.sort((a,b) => b.updatedAt - a.updatedAt).forEach(n => rows.appendChild(noteRow(n)));
+    el.appendChild(sec);
+  }
+
+  /* a quick way back into what you touched last */
+  const recent = state.notes.slice().sort((a,b) => b.updatedAt - a.updatedAt).slice(0, 4);
+  if (recent.length > 1){
+    const sec = h('<section class="section"><div class="section-hd"><h2>Recently edited</h2></div><div class="rows"></div></section>');
+    const rows = sec.querySelector('.rows');
+    recent.forEach(n => rows.appendChild(noteRow(n, true)));
+    el.appendChild(sec);
+  }
+  return el;
+}
+
+function noteRow(n, showFolder){
+  const f = n.folderId ? folderById(n.folderId) : null;
+  const sub = [showFolder && f ? f.name : null, noteWhen(n)].filter(Boolean).join(' · ');
+  const r = h('<button class="row" style="align-items:flex-start">'
+    + (n.pinned ? '<span class="icon sm" style="background:var(--warn-soft);margin-top:3px">📌</span>' : '')
+    + '<span class="body"><span class="t">' + esc(n.title || 'Untitled') + '</span>'
+    + '<span class="s">' + esc(noteExcerpt(n)) + '</span>'
+    + '<span class="s" style="color:var(--text-3);font-size:12px">' + esc(sub) + '</span></span>'
+    + '<span class="chev">' + ico('chevR',17) + '</span></button>');
+  if (!n.pinned) r.classList.add('norule');
+  r.onclick = () => editNote(n.id);
+  return r;
+}
+
+/* ---------- one folder ---------- */
+function viewNoteFolder(fid){
+  const f = folderById(fid);
+  if (!f){ ui.noteFolder = null; return viewNotes(); }
+  const wrap = h('<div style="flex:1;display:flex;flex-direction:column"></div>');
+
+  const back = h('<button class="pill neutral" style="gap:3px;padding:6px 11px 6px 7px">' + ico('chevL',15,2.4) + 'Notes</button>');
+  back.onclick = () => { ui.noteFolder = null; haptic(); render(); };
+  const edit = h('<button class="pill neutral" style="gap:4px">' + ico('edit',13,2) + 'Edit</button>');
+  edit.onclick = () => editFolder(fid);
+
+  const hdr = h('<header class="hdr"></header>');
+  const top = h('<div class="hdr-row" style="min-height:30px"></div>');
+  top.append(back, h('<span style="flex:1"></span>'), edit);
+  const title = h('<div class="hdr-row" style="margin-top:4px"></div>');
+  title.appendChild(h('<h1>' + esc(f.icon + ' ' + f.name) + '</h1>'));
+  hdr.append(top, title);
+  wrap.appendChild(hdr);
+
+  const c = h('<main class="content fade-in"></main>');
+  const notes = notesInFolder(fid);
+  if (!notes.length){
+    const card = h('<div class="card"></div>');
+    card.appendChild(emptyState('📝', 'This folder is empty', 'Tap + to write your first note here.',
+      'New note', () => editNote(null, fid)));
+    c.appendChild(card);
+  } else {
+    const rows = h('<div class="rows"></div>');
+    notes.forEach(n => rows.appendChild(noteRow(n)));
+    c.appendChild(rows);
+    c.appendChild(h('<div class="group-note" style="margin-top:14px">' + plural(notes.length, 'note') + ' in this folder.</div>'));
+  }
+  wrap.appendChild(c);
+  return wrap;
+}
+
+/* ---------- folder editor ---------- */
+function editFolder(fid){
+  const existing = fid ? folderById(fid) : null;
+  const draft = existing ? Object.assign({}, existing)
+    : {id:uid(), name:'', icon:'📁', color:'blue', createdAt:Date.now()};
+  const count = existing ? notesInFolder(existing.id).length : 0;
+
+  sheet({
+    title: existing ? 'Edit folder' : 'New folder', left:'Cancel', right:'Save',
+    build(s){
+      s.body.innerHTML =
+        '<div class="form-group"><label class="fr"><span class="lab">Name</span>'
+        + '<input id="fn" type="text" placeholder="Bills, Car, Ideas…" maxlength="30" value="' + esc(draft.name) + '"></label></div>'
+        + '<div class="form-group"><div class="fr col"><span class="lab">COLOR</span><div class="swatches" id="sw"></div></div>'
+        + '<div class="fr col"><span class="lab">ICON</span><div class="emoji-grid" id="eg"></div></div></div>'
+        + (existing ? '<button class="btn danger" id="del">Delete folder</button>'
+            + (count ? '<div class="group-note" style="margin-top:10px">Its ' + plural(count, 'note')
+              + ' would not be deleted — they move to Unfiled.</div>' : '') : '');
+      const fn = s.body.querySelector('#fn');
+      const validate = () => s.setRight('Save', fn.value.trim().length > 0);
+      fn.oninput = validate;
+      const sw = s.body.querySelector('#sw');
+      PALETTE.forEach(pl => {
+        const b = h('<button class="sw" aria-selected="' + (pl.id===draft.color) + '" aria-label="' + pl.id + '"><i style="background:' + (isDark()?pl.dark:pl.light) + '"></i></button>');
+        b.onclick = () => { draft.color = pl.id; sw.querySelectorAll('.sw').forEach(x => x.setAttribute('aria-selected','false')); b.setAttribute('aria-selected','true'); };
+        sw.appendChild(b);
+      });
+      const eg = s.body.querySelector('#eg');
+      NOTE_ICONS.forEach(e => {
+        const b = h('<button aria-selected="' + (e===draft.icon) + '">' + e + '</button>');
+        b.onclick = () => { draft.icon = e; eg.querySelectorAll('button').forEach(x => x.setAttribute('aria-selected','false')); b.setAttribute('aria-selected','true'); };
+        eg.appendChild(b);
+      });
+      const del = s.body.querySelector('#del');
+      if (del) del.onclick = async () => {
+        const ok = await confirmBox('Delete this folder?',
+          count ? 'Its ' + plural(count, 'note') + ' will move to Unfiled, not be deleted.' : 'The folder is empty.',
+          'Delete', true);
+        if (!ok) return;
+        state.notes.forEach(n => { if (n.folderId === existing.id) n.folderId = null; });
+        state.noteFolders = state.noteFolders.filter(x => x.id !== existing.id);
+        if (ui.noteFolder === existing.id) ui.noteFolder = null;
+        save(true); s.close(); render(); toast('Folder deleted');
+      };
+      validate();
+      setTimeout(() => fn.focus(), 380);
+    },
+    onRight(close){
+      const nm = $('#fn').value.trim();
+      if (!nm){ toast('Give the folder a name'); return; }
+      draft.name = nm;
+      if (existing) Object.assign(existing, draft); else state.noteFolders.push(draft);
+      save(true); close(); render(); toast(existing ? 'Saved' : 'Folder created');
+    }
+  });
+}
+
+/* ---------- note editor ---------- */
+function editNote(noteId, presetFolder){
+  const existing = noteId ? state.notes.find(n => n.id === noteId) : null;
+  const draft = existing ? Object.assign({}, existing)
+    : {id:uid(), folderId: presetFolder || ui.noteFolder || null, title:'', body:'',
+       pinned:false, createdAt:Date.now(), updatedAt:Date.now()};
+  let dirty = false;
+
+  const s = sheet({
+    title: existing ? 'Note' : 'New note', left:'Cancel', right:'Save',
+    dismissible: false,
+    onLeft(close){
+      if (!dirty) return close();
+      confirmBox('Discard changes?', 'This note will not be saved.', 'Discard', true).then(ok => { if (ok) close(); });
+    },
+    build(sh){
+      const f = draft.folderId ? folderById(draft.folderId) : null;
+      sh.body.innerHTML =
+        '<input id="nt" type="text" placeholder="Title" maxlength="80" value="' + esc(draft.title) + '" '
+        + 'style="width:100%;font-family:var(--font-round);font-size:24px;font-weight:750;letter-spacing:-.5px;padding:4px 2px 10px">'
+        + '<textarea id="nb" placeholder="Write anything here…" '
+        + 'style="width:100%;min-height:38vh;font-size:16px;line-height:1.5;padding:2px;resize:vertical">' + esc(draft.body) + '</textarea>'
+        + '<div class="form-group" style="margin-top:16px">'
+          + '<button class="fr" id="pickf"><span class="lab">Folder</span><span class="val">'
+            + (f ? esc(f.icon + '  ' + f.name) : 'Unfiled') + '</span><span class="chev">' + ico('chevR',17) + '</span></button>'
+          + '<button class="fr" id="pin"><span class="lab" style="flex:1;min-width:0">Pin to the top</span>'
+            + '<span class="switch" role="switch" aria-checked="' + !!draft.pinned + '"><i></i></span></button>'
+        + '</div>'
+        + (existing ? '<div class="group-note">Created ' + esc(dayLabel(dateToISO(new Date(existing.createdAt))))
+            + ' · last edited ' + esc(noteWhen(existing)) + '</div>'
+            + '<button class="btn danger" id="del">Delete note</button>' : '');
+
+      const nt = sh.body.querySelector('#nt'), nb = sh.body.querySelector('#nb');
+      const touch = () => { dirty = true; sh.setRight('Save', !!(nt.value.trim() || nb.value.trim())); };
+      nt.oninput = touch; nb.oninput = touch;
+      sh.setRight('Save', !!(draft.title.trim() || draft.body.trim()));
+
+      sh.body.querySelector('#pickf').onclick = () => {
+        const items = state.noteFolders.map(x => ({id:x.id, name:x.name, icon:x.icon, color:x.color}));
+        items.unshift({id:'__none', name:'Unfiled', icon:'—', color:'slate'});
+        pickerSheet('Move to folder', items, draft.folderId || '__none', (id, act) => {
+          if (act === 'new'){ editFolder(null); return; }
+          if (!id) return;
+          draft.folderId = id === '__none' ? null : id;
+          draft.title = nt.value; draft.body = nb.value;
+          dirty = true;
+          sh.close(); setTimeout(() => editNoteResume(draft, existing, dirty), 260);
+        }, '<button class="btn secondary" data-act="new" style="margin-bottom:14px">+ New folder</button>');
+      };
+      sh.body.querySelector('#pin').onclick = () => {
+        draft.pinned = !draft.pinned; dirty = true;
+        sh.body.querySelector('#pin .switch').setAttribute('aria-checked', draft.pinned);
+        haptic();
+      };
+      const del = sh.body.querySelector('#del');
+      if (del) del.onclick = async () => {
+        if (await confirmBox('Delete this note?', 'It cannot be brought back.', 'Delete', true)){
+          state.notes = state.notes.filter(n => n.id !== existing.id);
+          save(true); sh.close(); render(); toast('Note deleted');
+        }
+      };
+      setTimeout(() => { if (!existing) nt.focus(); }, 380);
+    },
+    onRight(close){
+      const nt = $('#nt'), nb = $('#nb');
+      draft.title = (nt ? nt.value : draft.title).trim();
+      draft.body = (nb ? nb.value : draft.body);
+      if (!draft.title && !draft.body.trim()){ toast('Write something first'); return; }
+      if (!draft.title) draft.title = draft.body.trim().split('\n')[0].slice(0, 60);
+      draft.updatedAt = Date.now();
+      if (existing) Object.assign(existing, draft); else state.notes.push(draft);
+      save(true); close(); render(); toast(existing ? 'Saved' : 'Note created');
+    }
+  });
+  return s;
+}
+/** Reopen the editor after the folder picker replaced it, keeping the draft. */
+function editNoteResume(draft, existing, dirty){
+  if (existing){ Object.assign(existing, draft, {updatedAt: Date.now()}); save(true); render(); editNote(existing.id); }
+  else { state.notes.push(Object.assign({}, draft, {updatedAt: Date.now()})); save(true); render(); editNote(draft.id); }
 }
 
 /* ============================================================
@@ -3075,12 +3436,14 @@ function viewSettings(){
         + nav('theme','Appearance', themeLabel)
         + toggle('hide','Blur amounts', state.settings.hideAmounts, 'Hides figures from anyone glancing at your screen'))
     + group('Your setup',
-        nav('cats','Categories', state.categories.filter(x=>!x.isArchived).length + ' active')
+        nav('bmonth','Budget month', usesCalendarMonths() ? 'Calendar month' : esc(ordinal(budgetStartDay()) + ' → ' + ordinal(budgetStartDay() - 1 || 28)))
+      + nav('cats','Categories', state.categories.filter(x=>!x.isArchived).length + ' active')
       + nav('rec','Recurring entries', state.recurring.filter(r=>r.active).length + ' active'))
     + group('Privacy',
         toggle('pin','Require a PIN', state.settings.pinLock, 'Asked for each time the app opens'))
     + group('Your data',
-        nav('backup','Export backup file', state.settings.lastBackupAt ? 'Last: ' + esc(shortDate(state.settings.lastBackupAt)) : 'Never')
+        nav('auto','Automatic backup', autoCfg().enabled ? esc((FREQS[autoCfg().frequency]||FREQS.weekly).label) : 'Off')
+      + nav('backup','Export backup file', state.settings.lastBackupAt ? 'Last: ' + esc(shortDate(state.settings.lastBackupAt)) : 'Never')
       + nav('restore','Restore from backup')
       + nav('csv','Export spreadsheet (CSV)')
       + nav('csvin','Import from CSV')
@@ -3088,15 +3451,18 @@ function viewSettings(){
     + group('About',
         '<div class="fr"><span class="lab" style="flex:1">Transactions</span><span class="val tnum">' + state.transactions.length + '</span></div>'
       + '<div class="fr"><span class="lab" style="flex:1">Savings goals</span><span class="val tnum">' + state.goals.length + '</span></div>'
+      + '<div class="fr"><span class="lab" style="flex:1">Notes</span><span class="val tnum">' + state.notes.length + '</span></div>'
       + '<div class="fr"><span class="lab" style="flex:1">Storage used</span><span class="val tnum" id="szv">…</span></div>'
-      + nav('how','How your data is stored'))
+      + nav('how','How your data is stored')
+      + nav('update','Version', 'v' + APP_VERSION))
     + '<div style="text-align:center;color:var(--text-3);font-size:12.5px;margin:26px 0 8px;line-height:1.5">'
-      + 'John Money · version 1.1<br>Runs entirely on this device. No account, no server, no tracking.</div>';
+      + 'John Money · version ' + APP_VERSION + '<br>Runs entirely on this device. No account, no server, no tracking.</div>';
 
   const acts = {
     cur: pickCurrency, theme: pickTheme, cats: manageCategories, rec: manageRecurring,
+    bmonth: pickBudgetMonth, auto: autoBackupSheet,
     backup: exportBackup, restore: importBackup, csv: () => exportCSV(), csvin: importCSV,
-    reset: resetAll, how: explainStorage,
+    reset: resetAll, how: explainStorage, update: checkForUpdate,
     hide: () => { state.settings.hideAmounts = !state.settings.hideAmounts; save(true); haptic(); render(); },
     pin: togglePin
   };
@@ -3136,6 +3502,108 @@ function explainStorage(){
       + '<p><b style="color:var(--text)">Two things erase it:</b> clearing website data in Safari settings, or deleting the app from your Home Screen. Everyday use, restarts and iOS updates do not.</p>'
       + '<p style="margin-bottom:0"><b style="color:var(--text)">So take a backup now and then.</b> "Export backup file" saves one file holding everything; "Restore from backup" puts it back — also on a new phone.</p></div>';
   }});
+}
+
+function ordinal(n){
+  const s = ['th','st','nd','rd'], v = n % 100;
+  return n + (s[(v - 20) % 10] || s[v] || s[0]);
+}
+
+/** Choose which day of the month your budget month begins on. */
+function pickBudgetMonth(){
+  let day = budgetStartDay();
+  sheet({
+    title:'Budget month', left:'Cancel', right:'Save',
+    build(s){
+      const draw = () => {
+        const prevDay = state.settings.budgetStartDay;
+        state.settings.budgetStartDay = day;           // preview with the chosen day
+        const pk = thisMonth();
+        const preview = day === 1
+          ? monthLabel(pk, {month:'long', year:'numeric'})
+          : shortDate(periodStart(pk)) + ' – ' + shortDate(periodLast(pk)) + ' ' + periodLast(pk).slice(0,4);
+        const len = daysInPeriod(pk);
+        state.settings.budgetStartDay = prevDay;
+
+        s.body.innerHTML =
+          '<div class="group-note" style="margin-top:0">If your salary lands on the 10th, budgeting from the 1st splits every pay cheque in two. '
+          + 'Pick the day your money arrives and every budget, limit and report follows it instead of the calendar.</div>'
+          + '<div class="card pad" style="text-align:center;margin-bottom:16px">'
+            + '<div style="font-size:12px;font-weight:650;color:var(--text-2);letter-spacing:.3px">THIS BUDGET MONTH</div>'
+            + '<div style="font-family:var(--font-round);font-size:22px;font-weight:800;letter-spacing:-.5px;margin:4px 0 2px">' + esc(preview) + '</div>'
+            + '<div style="font-size:13px;color:var(--text-2)">' + len + ' days</div></div>'
+          + '<div class="section-hd"><h2>Starts on the</h2></div>'
+          + '<div class="daygrid" id="dg"></div>'
+          + '<div class="group-note" style="margin-top:14px">Days 29–31 are not offered, because February would have no such day. '
+          + 'Choosing the 1st gives you ordinary calendar months.</div>';
+
+        const dg = s.body.querySelector('#dg');
+        for (let d = 1; d <= 28; d++){
+          const b = h('<button class="dayc" aria-selected="' + (d === day) + '">' + d + '</button>');
+          b.onclick = () => { day = d; haptic(); draw(); };
+          dg.appendChild(b);
+        }
+      };
+      draw();
+    },
+    onRight(close){
+      const before = budgetStartDay();
+      state.settings.budgetStartDay = day;
+      save(true);
+      ui.month = thisMonth();
+      close(); render();
+      toast(day === 1 ? 'Back to calendar months' : 'Budget month starts on the ' + ordinal(day));
+      if (before !== day && (Object.keys(state.monthlyBudgets).length || state.transactions.length)){
+        setTimeout(() => alertBox('Your figures have been regrouped',
+          'Nothing was deleted or changed — every entry keeps its own date. They are simply counted against the new budget months, so totals for a period may look different from before.'), 700);
+      }
+    }
+  });
+}
+
+/** Ask the service worker to look for a newer build, then reload into it. */
+function checkForUpdate(){
+  sheet({
+    title:'Version', left:'Done',
+    build(s){
+      const hosted = location.protocol.startsWith('http');
+      s.body.innerHTML =
+        '<div class="card pad" style="text-align:center">'
+        + '<div style="font-family:var(--font-round);font-size:34px;font-weight:800;letter-spacing:-1px">v' + APP_VERSION + '</div>'
+        + '<div style="font-size:13.5px;color:var(--text-2);margin-top:2px">John Money</div></div>'
+        + '<div class="group-note" style="margin-top:16px">Updating replaces the app\'s code only. Your entries, notes, budgets and '
+        + 'settings live separately on this device and are never touched by an update.</div>'
+        + (hosted
+            ? '<button class="btn" id="chk">Check for an update</button>'
+              + '<div id="chkmsg" class="group-note" style="margin-top:12px"></div>'
+            : '<div class="group-note">This copy was opened from a file rather than a web address, so there is nothing to check against.</div>')
+        + '<div class="section-hd" style="margin-top:20px"><h2>Before you update</h2></div>'
+        + '<div class="card pad" style="font-size:14px;line-height:1.5;color:var(--text-2)">'
+        + '<p style="margin-top:0">Take a backup first — <b style="color:var(--text)">Settings → Export backup file</b>. '
+        + 'If an update ever goes wrong, restoring that file puts everything back.</p>'
+        + '<p style="margin-bottom:0">Keep using the same web address. A different address is treated as a different app by the '
+        + 'phone, with its own separate storage.</p></div>';
+
+      const chk = s.body.querySelector('#chk');
+      if (chk) chk.onclick = async () => {
+        const msg = s.body.querySelector('#chkmsg');
+        msg.textContent = 'Checking…';
+        try {
+          const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration();
+          if (reg){
+            await reg.update();
+            if (reg.waiting || reg.installing){
+              msg.innerHTML = '<b style="color:var(--text)">An update is ready.</b> Reloading…';
+              setTimeout(() => location.reload(), 1200);
+              return;
+            }
+          }
+          const res = await fetch(location.href, {cache:'reload'}).catch(() => null);
+          msg.textContent = res ? 'You are on the latest version that this address is serving.' : 'Could not reach the server — you may be offline.';
+        } catch(e){ msg.textContent = 'Could not check just now.'; }
+      };
+    }
+  });
 }
 
 /* ============================================================
@@ -3470,6 +3938,7 @@ async function applyBackup(text, s){
     'The backup holds ' + data.transactions.length + ' transactions, ' + (data.categories||[]).length + ' categories and ' + (data.goals||[]).length + ' goals. Everything currently in the app is replaced.',
     'Restore', true);
   if (!ok) return;
+  await snapshotNow('before restore');
   const migrated = migrate(data);
   if (!migrated){ alertBox('Could not read that file'); return; }
   state = migrated;
@@ -3592,6 +4061,7 @@ async function doImportCSV(text, s){
   });
 
   if (!added.length){ alertBox('Nothing imported', problems.slice(0,4).join('\n') || 'No usable rows found.'); return; }
+  await snapshotNow('before CSV import');
   const ok = await confirmBox('Import ' + added.length + ' transactions?',
     (problems.length ? problems.length + ' rows will be skipped. ' : '') + 'They are added to your existing data.', 'Import');
   if (!ok) return;
@@ -3607,12 +4077,14 @@ async function resetAll(){
   if (!ok) return;
   const sure = await confirmBox('Really erase?', 'Last chance — export a backup instead if you might want this later.', 'Erase everything', true);
   if (!sure) return;
+  await snapshotNow('before erase');   // recoverable from Settings > Automatic backup
   state = blankState();
   state.categories = seedCategories();
   state.settings.onboarded = false;
   save(true);
   try { localStorage.removeItem(DB_KEY); } catch(e){}
   idbPut(DB_KEY, JSON.stringify(state));
+  toast('Erased — a restore point was kept');
   ui.month = thisMonth(); ui.tab = 'dashboard';
   render();
 }
@@ -3688,6 +4160,239 @@ function renderOnboarding(app){
 }
 
 /* ============================================================
+   AUTOMATIC BACKUP
+
+   Two things happen, and they protect against different disasters.
+
+   1. A RESTORE POINT kept inside the app's own storage, in its own
+      IndexedDB record, overwritten each time the schedule fires. This is
+      the "one file on the device, overwritten when the backup starts".
+      It survives a bad import, an accidental erase, a broken update — the
+      failures that actually happen. It does not survive clearing website
+      data or losing the phone.
+
+   2. A REAL FILE, where the browser allows it. Desktop Chrome and Edge can
+      be given one file once and then write to it for ever after, with no
+      further prompting. Safari on iPhone has no such API at all: a web app
+      there cannot write a file without a tap. So on iPhone the app keeps
+      the restore point, and when a file backup falls due it asks — once —
+      with a one-tap save. Pretending otherwise would be the worst kind of
+      backup: the sort you think you have.
+   ============================================================ */
+
+const AUTO_KEY = 'kasa.autobackup';          // IndexedDB record, see DB_KEY note
+const HANDLE_KEY = 'kasa.backupfile';
+
+const FREQS = {
+  daily:      {label:'Every day',      days:1},
+  weekly:     {label:'Every week',     days:7},
+  fortnightly:{label:'Every 2 weeks',  days:14},
+  monthly:    {label:'Every month',    days:30}
+};
+
+function autoCfg(){
+  const s = state.settings;
+  if (!s.autoBackup) s.autoBackup = {enabled:true, frequency:'weekly', lastRunAt:null, lastFileAt:null, fileName:null};
+  return s.autoBackup;
+}
+const fileBackupSupported = () => typeof window !== 'undefined' && 'showSaveFilePicker' in window;
+
+function backupDue(){
+  const cfg = autoCfg();
+  if (!cfg.enabled) return false;
+  if (!cfg.lastRunAt) return true;
+  const days = (FREQS[cfg.frequency] || FREQS.weekly).days;
+  return daysBetween(cfg.lastRunAt, todayISO()) >= days;
+}
+function nextDueDate(){
+  const cfg = autoCfg();
+  if (!cfg.lastRunAt) return todayISO();
+  return addDays(cfg.lastRunAt, (FREQS[cfg.frequency] || FREQS.weekly).days);
+}
+
+function backupPayload(){
+  return JSON.stringify({
+    app:'john-money', schema:SCHEMA, exportedAt:new Date().toISOString(), data:state
+  });
+}
+
+/** Overwrite the single restore point held inside the app. */
+async function snapshotNow(reason){
+  try {
+    await idbPut(AUTO_KEY, JSON.stringify({
+      savedAt: Date.now(), savedOn: todayISO(), reason: reason || 'scheduled',
+      counts: {
+        transactions: state.transactions.length,
+        categories: state.categories.length,
+        goals: state.goals.length,
+        notes: state.notes.length
+      },
+      payload: backupPayload()
+    }));
+    return true;
+  } catch(e){ return false; }
+}
+async function readSnapshot(){
+  try { const raw = await idbGet(AUTO_KEY); return raw ? JSON.parse(raw) : null; }
+  catch(e){ return null; }
+}
+
+/* ---------- the real file, where the browser allows one ---------- */
+async function chooseBackupFile(){
+  if (!fileBackupSupported()){ alertBox('Not available in this browser', 'This browser cannot give a page lasting access to a file. The restore point inside the app still works.'); return; }
+  try {
+    const handle = await window.showSaveFilePicker({
+      suggestedName: 'john-money-backup.json',
+      types: [{description:'John Money backup', accept:{'application/json':['.json']}}]
+    });
+    await idbPut(HANDLE_KEY, handle);
+    autoCfg().fileName = handle.name;
+    save(true);
+    const ok = await writeBackupFile();
+    toast(ok ? 'Backup file set up' : 'File chosen, but writing failed');
+    return ok;
+  } catch(e){ return false; }   // the person cancelled the picker
+}
+async function backupFileHandle(){
+  try { return (await idbGet(HANDLE_KEY)) || null; } catch(e){ return null; }
+}
+/** Returns 'ok' | 'needs-permission' | 'none' | 'failed'. */
+async function writeBackupFile(){
+  const handle = await backupFileHandle();
+  if (!handle) return 'none';
+  try {
+    const opts = {mode:'readwrite'};
+    let perm = await handle.queryPermission(opts);
+    if (perm === 'prompt') perm = await handle.requestPermission(opts);
+    if (perm !== 'granted') return 'needs-permission';
+    const w = await handle.createWritable();      // truncates: one file, overwritten
+    await w.write(backupPayload());
+    await w.close();
+    autoCfg().lastFileAt = todayISO();
+    save(true);
+    return 'ok';
+  } catch(e){ return 'failed'; }
+}
+
+/** Called at launch. Never blocks, never nags more than once a day. */
+async function runAutoBackup(){
+  if (!backupDue()) return;
+  const cfg = autoCfg();
+  await snapshotNow('scheduled');
+  cfg.lastRunAt = todayISO();
+  save(true);
+
+  const res = await writeBackupFile();
+  if (res === 'ok'){ toast('Backup saved'); return; }
+  /* No silent file write available — ask, once, rather than pretend. */
+  if (cfg.fileName || !fileBackupSupported()) offerManualBackup(res);
+}
+
+function offerManualBackup(reason){
+  const cfg = autoCfg();
+  setTimeout(() => {
+    sheet({
+      title:'Backup due', left:'Later', right:'Save now',
+      build(s){
+        s.body.innerHTML =
+          '<div class="card pad" style="font-size:14.5px;line-height:1.55;color:var(--text-2)">'
+          + '<p style="margin-top:0"><b style="color:var(--text)">A restore point has just been saved inside the app.</b> '
+          + 'That covers a bad import or an accidental erase.</p>'
+          + '<p style="margin-bottom:0">It does not cover losing the phone or clearing website data. '
+          + (reason === 'needs-permission'
+              ? 'Your backup file needs permission again — saving now will ask for it.'
+              : 'Safari on iPhone cannot write a file on its own, so this one tap is the part only you can do.')
+          + ' Choose <b>Save to Files</b> and keep it in iCloud Drive.</p></div>';
+      },
+      onRight(close){ close(); exportBackup(); }
+    });
+  }, 1200);
+}
+
+/* ---------- settings screen ---------- */
+function autoBackupSheet(){
+  sheet({
+    title:'Automatic backup', left:'Done',
+    onClose(){ render(); },
+    build(s){
+      const draw = async () => {
+        const cfg = autoCfg();
+        const snap = await readSnapshot();
+        const handle = await backupFileHandle();
+        s.body.innerHTML =
+          '<button class="fr form-group" id="en" style="width:100%">'
+            + '<span style="flex:1;min-width:0"><span class="lab" style="display:block">Automatic backup</span>'
+            + '<span style="font-size:12.5px;color:var(--text-2)">Saves a restore point on a schedule</span></span>'
+            + '<span class="switch" role="switch" aria-checked="' + !!cfg.enabled + '"><i></i></span></button>'
+          + (cfg.enabled
+              ? '<div class="section-hd"><h2>How often</h2></div><div class="form-group" id="fq">'
+                + Object.keys(FREQS).map(k =>
+                    '<button class="fr" data-f="' + k + '"><span class="lab" style="flex:1;min-width:0">' + FREQS[k].label + '</span>'
+                    + (cfg.frequency === k ? '<span style="color:var(--accent)">' + ico('check',20) + '</span>' : '') + '</button>').join('')
+                + '</div>'
+              : '')
+          + '<div class="section-hd"><h2>Restore point in the app</h2></div>'
+          + '<div class="form-group">'
+            + (snap
+                ? statRow('Last saved', esc(dayLabel(snap.savedOn)))
+                  + statRow('Holds', plural(snap.counts.transactions, 'transaction') + ', ' + plural(snap.counts.notes, 'note'))
+                  + (cfg.enabled ? statRow('Next due', esc(dayLabel(nextDueDate()))) : '')
+                  + '<button class="fr" id="restore"><span class="lab" style="flex:1;min-width:0;color:var(--accent)">Restore from this point</span>'
+                  + '<span class="chev">' + ico('chevR',17) + '</span></button>'
+                : '<div class="fr"><span class="lab muted" style="flex:1">No restore point saved yet</span></div>')
+            + '<button class="fr" id="now"><span class="lab" style="flex:1;min-width:0;color:var(--accent)">Back up now</span></button>'
+          + '</div>'
+          + '<div class="section-hd"><h2>Backup file on this device</h2></div>'
+          + (fileBackupSupported()
+              ? '<div class="form-group">'
+                + (handle
+                    ? statRow('File', esc(cfg.fileName || 'chosen'))
+                      + statRow('Last written', cfg.lastFileAt ? esc(dayLabel(cfg.lastFileAt)) : 'Not yet')
+                    : '')
+                + '<button class="fr" id="pickfile"><span class="lab" style="flex:1;min-width:0;color:var(--accent)">'
+                + (handle ? 'Choose a different file' : 'Choose a file to keep updated') + '</span>'
+                + '<span class="chev">' + ico('chevR',17) + '</span></button></div>'
+                + '<div class="group-note">The same file is overwritten every time, so it never piles up. This browser can write it without asking again.</div>'
+              : '<div class="card pad" style="font-size:14px;line-height:1.5;color:var(--text-2)">'
+                + '<p style="margin:0"><b style="color:var(--text)">This browser cannot write a file on its own.</b> '
+                + 'Safari on iPhone has no way for a web app to save a file without a tap — so when a backup falls due, '
+                + 'the app asks you once and saves it in a single tap. The restore point above is kept automatically either way.</p></div>')
+          + '<div class="group-note" style="margin-top:16px">A restore point lives inside the app, so it survives a bad import or an '
+          + 'accidental erase — but not clearing website data or losing the phone. Keep a file backup as well for those.</div>';
+
+        s.body.querySelector('#en').onclick = () => {
+          cfg.enabled = !cfg.enabled; save(true); haptic(); draw();
+        };
+        s.body.querySelectorAll('[data-f]').forEach(b => b.onclick = () => {
+          cfg.frequency = b.dataset.f; save(true); haptic(); draw();
+        });
+        const now = s.body.querySelector('#now');
+        if (now) now.onclick = async () => {
+          await snapshotNow('manual');
+          cfg.lastRunAt = todayISO(); save(true);
+          const res = await writeBackupFile();
+          toast(res === 'ok' ? 'Backed up to your file' : 'Restore point saved');
+          draw();
+        };
+        const rst = s.body.querySelector('#restore');
+        if (rst) rst.onclick = async () => {
+          const ok = await confirmBox('Restore from ' + dayLabel(snap.savedOn) + '?',
+            'Everything in the app is replaced with the ' + plural(snap.counts.transactions, 'transaction')
+            + ' and ' + plural(snap.counts.notes, 'note') + ' saved then. A restore point of the current data is taken first.',
+            'Restore', true);
+          if (!ok) return;
+          await snapshotNow('before restore');
+          applyBackup(snap.payload, s);
+        };
+        const pf = s.body.querySelector('#pickfile');
+        if (pf) pf.onclick = () => chooseBackupFile().then(draw);
+      };
+      draw();
+    }
+  });
+}
+
+/* ============================================================
    SAMPLE DATA (for trying the app out)
    ============================================================ */
 function loadDemo(){
@@ -3743,6 +4448,28 @@ function loadDemo(){
     [['Groceries',150000],['Restaurants',80000],['Transport',40000],['Entertainment',40000],['Shopping',60000]]
       .forEach(([n2,v]) => { const id = cat(n2); if (id) s.categoryBudgets[mk][id] = v; });
   }
+  /* a few notes so the Notes tab is not empty on a first look */
+  const nf = [
+    {id:uid(), name:'Bills & accounts', icon:'🧾', color:'amber', createdAt:Date.now()-5e8},
+    {id:uid(), name:'Car',              icon:'🚗', color:'slate', createdAt:Date.now()-4e8},
+    {id:uid(), name:'Holiday planning', icon:'✈️', color:'teal',  createdAt:Date.now()-3e8}
+  ];
+  s.noteFolders = nf;
+  const N = (fi, title, body, ago, pinned) => ({
+    id:uid(), folderId: fi == null ? null : nf[fi].id, title, body,
+    pinned: !!pinned, createdAt: Date.now() - ago - 6e7, updatedAt: Date.now() - ago
+  });
+  s.notes = [
+    N(0, 'Electricity meter readings', 'Jan — 41 220\nApr — 42 108\nJul — 42 903\nOct — reading due, take a photo this time.', 864e5 * 2, true),
+    N(0, 'Internet contract', 'Two-year term ends in March. 89 zł/month now, 129 zł after.\nCall in February and ask for the retention offer before it rolls over.', 864e5 * 9),
+    N(0, 'Insurance renewal dates', 'Flat — 14 May\nCar — 2 September\nTravel — buy per trip, not annual.', 864e5 * 21),
+    N(1, 'Service history', '92 400 km — oil, filters, brake fluid.\n98 000 km — front pads.\nNext service due at about 105 000 km.', 864e5 * 4),
+    N(1, 'Winter tyres', 'Stored at the garage on Miodowa. Ticket in the glovebox.\nSwap over in the first week of November.', 864e5 * 30),
+    N(2, 'Packing list', 'Passports (check expiry — mine runs out in 8 months)\nAdapters\nSuncream\nCopy of the booking offline\nCard for the car hire deposit', 864e5 * 1),
+    N(2, 'Rough costings', 'Flights ~2 400\nApartment 7 nights ~3 100\nCar hire ~900\nFood and days out ~1 800\nComes to roughly 8 200 — the goal is set at 8 000, so a little short.', 864e5 * 6),
+    N(null, 'Things to sort out', 'Cancel the gym add-on I never use.\nMove the standing order to the day after payday.\nAsk about the dentist payment plan.', 864e5 * 12)
+  ];
+
   s.transactions = tx;
   s.updatedAt = Date.now();
   state = s;
@@ -3862,6 +4589,46 @@ function runTests(){
   eq('seeding is idempotent', state.categories.length, after1);
   ok('seeding added the missing defaults once', after1 > before);
 
+  /* ---- custom budget month (salary-day periods) ---- */
+  const savedStart = state.settings.budgetStartDay;
+  state.settings.budgetStartDay = 1;
+  eq('start day 1 = calendar month', periodOf('2026-09-01'), '2026-09');
+  eq('start day 1 period start', periodStart('2026-09'), '2026-09-01');
+  eq('start day 1 period length', daysInPeriod('2026-09'), 30);
+  eq('start day 1 label is a month name', monthLabel('2026-09', {month:'long'}).indexOf('–'), -1);
+
+  state.settings.budgetStartDay = 10;
+  eq('10th: day before start is the previous period', periodOf('2026-09-09'), '2026-08');
+  eq('10th: start day opens the period', periodOf('2026-09-10'), '2026-09');
+  eq('10th: last day of the period', periodOf('2026-10-09'), '2026-09');
+  eq('10th: next start opens the next period', periodOf('2026-10-10'), '2026-10');
+  eq('10th: period start date', periodStart('2026-09'), '2026-09-10');
+  eq('10th: period end is exclusive', periodEnd('2026-09'), '2026-10-10');
+  eq('10th: period covers 30 days', daysInPeriod('2026-09'), 30);
+  eq('10th: Feb period covers 28 days', daysInPeriod('2026-02'), 28);
+  eq('10th: Feb period covers 29 in a leap year', daysInPeriod('2028-02'), 29);
+  eq('10th: Dec period crosses the year', periodEnd('2026-12'), '2027-01-10');
+  eq('10th: January date falls in December period', periodOf('2027-01-05'), '2026-12');
+  eq('10th: datesInPeriod length matches', datesInPeriod('2026-09').length, 30);
+  eq('10th: first date in period', datesInPeriod('2026-09')[0], '2026-09-10');
+  eq('10th: last date in period', datesInPeriod('2026-09')[29], '2026-10-09');
+  ok('10th: inMonth spans the month boundary', inMonth('2026-10-05', '2026-09'));
+  ok('10th: inMonth excludes the day before', !inMonth('2026-09-09', '2026-09'));
+  ok('10th: label shows a date range', monthLabel('2026-09', {month:'long'}).indexOf('–') > -1);
+
+  /* the same fixture, re-bucketed by the new period boundaries */
+  eq('10th: Sep period picks up the 30 Sep and 1 Oct expenses',
+     Calc.expenses('2026-09'), 2450 + 50000 + 18000);
+  eq('10th: Aug period now holds the 2 Sep expense',
+     Calc.expenses('2026-08'), 99900 + 34000);
+  eq('10th: the 10 Sep deposit opens the Sep period', Calc.savedIn('2026-09'), 10000);
+  eq('10th: the 5 Aug deposit falls into the Jul period', Calc.savedIn('2026-07'), 25000);
+  eq('10th: nothing left in the Aug period savings', Calc.savedIn('2026-08'), 0);
+  eq('10th: withdrawal stays in the Sep period', Calc.savedOut('2026-09'), 4000);
+  eq('10th: goal balance is unaffected by periods', Calc.goalBalance('g1'), 31000);
+  eq('10th: daily totals cover the period', Calc.dailyTotals('2026-09').length, 30);
+  state.settings.budgetStartDay = savedStart;
+
   /* year boundary */
   state.transactions.push(T('expense', 12345, '2026-12-31', 'c2'), T('expense', 6789, '2027-01-01', 'c2'));
   eq('Dec total', Calc.expenses('2026-12'), 12345);
@@ -3897,6 +4664,7 @@ window.KASA = window.JM;   // old handle kept working
 
   if (state.settings.onboarded){
     ensureDefaultCategories();
+    runAutoBackup();
     const posted = runRecurring();
     if (posted) setTimeout(() => toast(posted + ' recurring entr' + (posted === 1 ? 'y' : 'ies') + ' added'), 900);
     if (state.settings.pinLock && state.settings.pinHash) lockActive = true;
@@ -3923,6 +4691,13 @@ window.KASA = window.JM;   // old handle kept working
   /* offline support when the app is served from a folder that also has sw.js */
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')){
     navigator.serviceWorker.register('sw.js').catch(() => {});
+    let reloading = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (reloading) return;
+      reloading = true;
+      toast('Updated — reloading');
+      setTimeout(() => location.reload(), 900);
+    });
   }
 })();
 
