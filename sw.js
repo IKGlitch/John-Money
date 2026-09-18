@@ -1,5 +1,5 @@
 /* John Money offline cache. Bump CACHE when index.html changes. */
-const CACHE = 'johnmoney-v12';
+const CACHE = 'johnmoney-v13';
 const ASSETS = ['./','./index.html','./manifest.json','./apple-touch-icon.png','./icon-192.png','./icon-512.png','./icon-512-maskable.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting()));

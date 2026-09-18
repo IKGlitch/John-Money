@@ -299,6 +299,10 @@ button.row:active,a.row:active{background:var(--card-2)}
 .shake{animation:shake .4s}
 @keyframes shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-9px)}40%{transform:translateX(8px)}60%{transform:translateX(-5px)}80%{transform:translateX(4px)}}
 .fade-in{animation:fadeIn .22s ease both}
+.slide-next{animation:slideFromRight .26s cubic-bezier(.32,.72,0,1) both}
+.slide-prev{animation:slideFromLeft .26s cubic-bezier(.32,.72,0,1) both}
+@keyframes slideFromRight{from{opacity:0;transform:translateX(30px)}to{opacity:1;transform:none}}
+@keyframes slideFromLeft{from{opacity:0;transform:translateX(-30px)}to{opacity:1;transform:none}}
 @keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion:reduce){*{animation-duration:.01ms !important;transition-duration:.01ms !important}}
 .swipe{position:relative;overflow:hidden;background:var(--neg)}
@@ -335,7 +339,7 @@ button.row:active,a.row:active{background:var(--card-2)}
 
 /* Storage identifier. Deliberately NOT renamed with the app: changing it would
    orphan every entry already saved on the device. It is never shown to anyone. */
-const APP_VERSION = '1.2';
+const APP_VERSION = '1.3';
 
 const DB_KEY = 'kasa.v1';
 const SCHEMA = 3;
@@ -612,7 +616,7 @@ function blankState(){
       currency:'PLN', theme:'system', onboarded:false,
       budgetStartDay: 1,
       pinHash:null, pinLock:false, carryPrompted:{},
-      hideAmounts:false, lastBackupAt:null, startTab:'dashboard',
+      hideAmounts:false, lastBackupAt:null, startTab:'dashboard', hintSwipeSeen:false,
       autoBackup:{enabled:true, frequency:'weekly', lastRunAt:null, lastFileAt:null, fileName:null}
     },
     categories: [],
@@ -1242,6 +1246,7 @@ const ui = {
   txFilter: {kind:'all', catId:null, goalId:null, q:''},
   noteFolder: null,
   noteQuery: '',
+  slideFrom: 0,
   budgetView: 'month',
   scrollMemo: {}
 };
@@ -1281,8 +1286,15 @@ function render(){
   screen.appendChild(views[ui.tab]());
   screen.appendChild(tabBar());
   if (ui.tab !== 'settings' && ui.tab !== 'reports') screen.appendChild(fabBtn());
+  /* a new period slides in from the side it came from */
+  if (ui.slideFrom){
+    const c = screen.querySelector('.content');
+    if (c){ c.classList.remove('fade-in'); c.classList.add(ui.slideFrom > 0 ? 'slide-next' : 'slide-prev'); }
+    ui.slideFrom = 0;
+  }
   app.replaceChildren(screen);
   bindStickyHeader();
+  bindMonthSwipe(screen);
 }
 
 function tabBar(){
@@ -1302,6 +1314,118 @@ function fabBtn(){
   b.onclick = () => { haptic(12); notes ? editNote(null) : addChooser(); };
   return b;
 }
+/* ============================================================
+   SWIPE BETWEEN MONTHS
+   Drag right for the previous period, left for the next — the way a
+   month strip moves in iOS Calendar, with the past to the left.
+
+   It deliberately stands down for: an open sheet, a vertical scroll, a
+   transaction row (those own their own left-swipe to delete), anything
+   that scrolls sideways itself, text fields, and the screen edges, where
+   iOS has its own gestures.
+   ============================================================ */
+function swipeTarget(){
+  if (ui.tab === 'dashboard' || ui.tab === 'budget' || ui.tab === 'transactions') return 'month';
+  if (ui.tab === 'reports'){
+    if (ui.reportPeriod === 'month') return 'month';
+    if (ui.reportPeriod === 'year') return 'year';
+  }
+  return null;
+}
+/** dir: -1 previous, +1 next. Returns false when there is nothing to move. */
+function shiftPeriod(dir){
+  const kind = swipeTarget();
+  if (!kind) return false;
+  if (kind === 'month') ui.month = monthShift(ui.month, dir);
+  else ui.year = String(Number(ui.year) + dir);
+  return true;
+}
+
+function bindMonthSwipe(screen){
+  if (!swipeTarget()) return;
+  const content = screen.querySelector('.content');
+  if (!content) return;
+
+  const EDGE = 24, START = 14, COMMIT = 68;
+  let x0 = 0, y0 = 0, dx = 0, live = false, engaged = false;
+
+  const standDown = (el) => {
+    while (el && el !== screen){
+      if (el.classList && el.classList.contains('swipe')) return true;   // row delete owns it
+      const tag = el.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+      if (el.scrollWidth > el.clientWidth + 4){
+        const ox = getComputedStyle(el).overflowX;
+        if (ox === 'auto' || ox === 'scroll') return true;
+      }
+      el = el.parentElement;
+    }
+    return false;
+  };
+
+  screen.addEventListener('touchstart', (e) => {
+    live = false; engaged = false; dx = 0;
+    if (e.touches.length !== 1) return;
+    if (openSheets > 0 || $('.sheet') || $('.dialog')) return;
+    const t = e.touches[0];
+    if (t.clientX < EDGE || t.clientX > window.innerWidth - EDGE) return;
+    if (standDown(e.target)) return;
+    live = true; x0 = t.clientX; y0 = t.clientY;
+    content.style.transition = 'none';
+  }, {passive:true});
+
+  screen.addEventListener('touchmove', (e) => {
+    if (!live) return;
+    const t = e.touches[0];
+    const nx = t.clientX - x0, ny = t.clientY - y0;
+    if (!engaged){
+      if (Math.abs(ny) > 12 && Math.abs(ny) >= Math.abs(nx)){ live = false; return; }
+      if (Math.abs(nx) < START || Math.abs(nx) < Math.abs(ny) * 1.4) return;
+      engaged = true;
+    }
+    e.preventDefault();                       // now it is ours, stop the page scrolling
+    dx = nx;
+    const pull = Math.sign(dx) * Math.min(Math.abs(dx) * 0.42, 110);
+    content.style.transform = 'translateX(' + pull.toFixed(1) + 'px)';
+    content.style.opacity = String(1 - Math.min(Math.abs(dx) / 420, 0.35));
+  }, {passive:false});
+
+  const release = () => {
+    if (!live) return;
+    live = false;
+    content.style.transition = 'transform .2s cubic-bezier(.32,.72,0,1), opacity .2s';
+    if (engaged && Math.abs(dx) > COMMIT){
+      const dir = dx < 0 ? 1 : -1;            // dragged left = forward in time
+      content.style.transform = 'translateX(' + (dir > 0 ? -64 : 64) + 'px)';
+      content.style.opacity = '0';
+      haptic(10);
+      setTimeout(() => {
+        if (shiftPeriod(dir)){ ui.slideFrom = dir; render(); }
+        else { content.style.transform = ''; content.style.opacity = ''; }
+      }, 130);
+    } else {
+      content.style.transform = '';
+      content.style.opacity = '';
+    }
+    engaged = false;
+  };
+  screen.addEventListener('touchend', release);
+  screen.addEventListener('touchcancel', release);
+}
+
+/** Left and right arrow keys do the same thing, which is handy on a laptop. */
+function bindPeriodKeys(){
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (openSheets > 0 || $('.sheet') || $('.dialog')) return;
+    const el = document.activeElement;
+    if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT')) return;
+    const dir = e.key === 'ArrowLeft' ? -1 : 1;
+    if (shiftPeriod(dir)){ e.preventDefault(); ui.slideFrom = dir; render(); }
+  });
+}
+
 function bindStickyHeader(){
   const hdr = $('.hdr');
   if (!hdr) return;
@@ -4780,6 +4904,13 @@ window.KASA = window.JM;   // old handle kept working
   }
   ui.month = thisMonth();
   render();
+  bindPeriodKeys();
+
+  /* one-time nudge, because a gesture nobody mentions is a gesture nobody finds */
+  if (state.settings.onboarded && !state.settings.hintSwipeSeen && state.transactions.length){
+    state.settings.hintSwipeSeen = true; save(true);
+    setTimeout(() => toast('Tip: swipe left or right to change month'), 1600);
+  }
 
   /* re-lock and refresh the month when the app comes back to the foreground */
   let hiddenAt = 0;
