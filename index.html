@@ -335,7 +335,7 @@ button.row:active,a.row:active{background:var(--card-2)}
 
 /* Storage identifier. Deliberately NOT renamed with the app: changing it would
    orphan every entry already saved on the device. It is never shown to anyone. */
-const APP_VERSION = '1.1';
+const APP_VERSION = '1.2';
 
 const DB_KEY = 'kasa.v1';
 const SCHEMA = 3;
@@ -992,6 +992,34 @@ Object.assign(Calc, {
     };
   },
 
+  /** Sum of the category limits set for this period. */
+  limitsTotal(pk){
+    const m = state.categoryBudgets[pk];
+    if (!m) return {total: 0, count: 0};
+    let total = 0, count = 0;
+    Object.keys(m).forEach(id => {
+      const cat = catById(id);
+      if (!cat || typeof m[id] !== 'number' || m[id] <= 0) return;
+      total += m[id]; count++;
+    });
+    return {total, count};
+  },
+
+  /** Expense categories with no limit this period, and what typically goes
+   *  through them — the gap between "total of my limits" and a real budget. */
+  uncoveredByLimits(pk){
+    const limited = state.categoryBudgets[pk] || {};
+    const months = [1, 2, 3].map(i => monthShift(pk, -i));
+    let typical = 0, count = 0;
+    catsOf('expense', true).forEach(cat => {
+      if (typeof limited[cat.id] === 'number' && limited[cat.id] > 0) return;
+      const avg = Math.round(months.reduce((s, mk) => s + Calc.spentInCat(mk, cat.id), 0) / months.length);
+      if (avg > 0){ typical += avg; count++; }
+      else if (!cat.isArchived) count++;
+    });
+    return {typical, count};
+  },
+
   /** Overall budget track record across a list of months. */
   budgetRecord(months){
     let withBudget = 0, under = 0, diffSum = 0;
@@ -1319,7 +1347,12 @@ function emptyState(emoji, title, text, actionLabel, onAction){
   return el;
 }
 
-const plural = (n, one, many) => n + ' ' + (n === 1 ? one : (many || one + 's'));
+const plural = (n, one, many) => {
+  if (n === 1) return n + ' ' + one;
+  if (many) return n + ' ' + many;
+  /* "category" -> "categories", not "categorys" */
+  return n + ' ' + (/[^aeiou]y$/.test(one) ? one.slice(0, -1) + 'ies' : one + 's');
+};
 
 /** Auto-size a big amount input so the currency symbol hugs the number.
  *  Measured with a mirror span, because `ch` units lie in a rounded font. */
@@ -3346,14 +3379,59 @@ function editMonthlyBudget(){
   sheet({
     title:'Budget · ' + monthLabel(mk, {month:'long'}), left:'Cancel', right:'Save',
     build(s){
+      const lim = Calc.limitsTotal(mk);
+      const gap = Calc.uncoveredByLimits(mk);
+      const withGap = lim.total + gap.typical;
+
       s.body.innerHTML =
         amountFieldHTML('b', val != null ? moneyInput(val) : '')
         + '<div class="group-note" style="text-align:center;margin-top:12px">How much you plan to spend in '
         + esc(monthLabel(mk,{month:'long'})) + '. Savings deposits do not use it up.</div>'
+        /* build the figure up from the limits already set, rather than guessing */
+        + (lim.count
+            ? '<div class="section-hd" style="margin-top:20px"><h2>Work it out from your limits</h2></div>'
+              + '<div class="card pad">'
+                + '<div style="display:flex;align-items:baseline;gap:8px">'
+                  + '<div style="flex:1;font-size:13.5px;color:var(--text-2)">' + plural(lim.count, 'category limit')
+                  + ' set for this month</div>'
+                  + '<div class="tnum" style="font-family:var(--font-round);font-size:20px;font-weight:800;letter-spacing:-.4px">'
+                  + esc(fmtMoney(lim.total)) + '</div></div>'
+                + '<button class="btn secondary" id="uselim" style="margin-top:12px;padding:11px">Use ' + esc(fmtMoney(lim.total)) + '</button>'
+                + (gap.count
+                    ? '<div style="margin-top:14px;padding-top:12px;border-top:.5px solid var(--sep);font-size:13px;color:var(--text-2);line-height:1.45">'
+                      + plural(gap.count, 'category', 'categories') + ' ' + (gap.count === 1 ? 'has' : 'have') + ' no limit'
+                      + (gap.typical
+                          ? ', and about <b>' + esc(fmtMoney(gap.typical)) + '</b> a month has been going through '
+                            + (gap.count === 1 ? 'it' : 'them') + '. A budget of only ' + esc(fmtMoney(lim.total))
+                            + ' would not cover that.'
+                          : ', though nothing has been spent in ' + (gap.count === 1 ? 'it' : 'them') + ' lately.')
+                      + '</div>'
+                      + (gap.typical
+                          ? '<button class="btn secondary" id="usegap" style="margin-top:10px;padding:11px">Use '
+                            + esc(fmtMoney(withGap)) + ' — limits plus that</button>'
+                          : '')
+                    : '<div style="margin-top:14px;padding-top:12px;border-top:.5px solid var(--sep);font-size:13px;color:var(--pos);line-height:1.45">'
+                      + 'Every expense category has a limit, so this total covers all of your spending.</div>')
+              + '</div>'
+            : '<div class="group-note" style="margin-top:18px">Set monthly limits on individual categories in the '
+              + '<b>Budget</b> tab and a button will appear here to add them up for you.</div>')
         + (val != null ? '<button class="btn danger" id="clr" style="margin-top:20px">Remove budget for this month</button>' : '');
+
       const b = s.body.querySelector('#b');
-      autosizeAmount(b);
+      const fit = autosizeAmount(b);
       b.oninput = () => { const v = parseMoney(b.value); val = v == null ? null : Math.abs(v); s.setRight('Save', true); };
+      const fill = (amount) => {
+        val = amount;
+        b.value = moneyInput(amount);
+        fit();
+        s.setRight('Save', true);
+        haptic(12);
+        toast('Amount filled in — tap Save to keep it');
+      };
+      const ul = s.body.querySelector('#uselim');
+      if (ul) ul.onclick = () => fill(lim.total);
+      const ug = s.body.querySelector('#usegap');
+      if (ug) ug.onclick = () => fill(withGap);
       const clr = s.body.querySelector('#clr');
       if (clr) clr.onclick = () => { delete state.monthlyBudgets[mk]; save(true); s.close(); render(); toast('Budget removed'); };
       setTimeout(() => b.focus(), 380);
@@ -4588,6 +4666,37 @@ function runTests(){
   ensureDefaultCategories();
   eq('seeding is idempotent', state.categories.length, after1);
   ok('seeding added the missing defaults once', after1 > before);
+
+  /* ---- plural helper ---- */
+  eq('plural 1 note', plural(1, 'note'), '1 note');
+  eq('plural 2 notes', plural(2, 'note'), '2 notes');
+  eq('plural 1 category', plural(1, 'category'), '1 category');
+  eq('plural 9 categories', plural(9, 'category'), '9 categories');
+  eq('plural respects an explicit form', plural(3, 'entry', 'entries'), '3 entries');
+  eq('plural leaves vowel+y alone', plural(2, 'day'), '2 days');
+
+  /* ---- budget suggested from the category limits ---- */
+  eq('limits total sums the limits set', Calc.limitsTotal('2026-09').total, 40000 + 10000);
+  eq('limits total counts them', Calc.limitsTotal('2026-09').count, 2);
+  eq('limits total is zero with no limits', Calc.limitsTotal('2026-07').total, 0);
+  eq('limits total ignores a zero limit', (function(){
+    state.categoryBudgets['2026-06'] = {c1: 0, c2: 5000};
+    return Calc.limitsTotal('2026-06').total;
+  })(), 5000);
+  eq('limits total ignores a deleted category', (function(){
+    state.categoryBudgets['2026-05'] = {gone: 9999, c2: 3000};
+    return Calc.limitsTotal('2026-05').total;
+  })(), 3000);
+  ok('uncovered counts categories with no limit', Calc.uncoveredByLimits('2026-09').count >= 1);
+  eq('uncovered is empty when every category has a limit', (function(){
+    const all = {};
+    catsOf('expense', true).forEach(c => { all[c.id] = 10000; });
+    state.categoryBudgets['2026-04'] = all;
+    return Calc.uncoveredByLimits('2026-04').count;
+  })(), 0);
+  delete state.categoryBudgets['2026-06'];
+  delete state.categoryBudgets['2026-05'];
+  delete state.categoryBudgets['2026-04'];
 
   /* ---- custom budget month (salary-day periods) ---- */
   const savedStart = state.settings.budgetStartDay;
